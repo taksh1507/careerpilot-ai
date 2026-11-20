@@ -4,6 +4,7 @@
 
 - The original 67-test baseline remains included in the current suite.
 - Full suite in Ubuntu 24.04 WSL2, Python 3.12.3, with the real local Sentence Transformer required: `80 passed in 20.88s`.
+- GitHub Actions CI for commit `962049660d4ed7e579a50be1588e20bd4850b382` passed all install, model-cache, compile, and full-test steps in 1m20s: [run 44743628472](https://github.com/taksh1507/careerpilot-ai/actions/runs/44743628472).
 - FastAPI integration tests ran as part of that suite; none were skipped.
 - Separate real-model integration test also passed: `1 passed in 251.25s` on first model download and initialization.
 - `python -m compileall -q adapters api cli filters matching models resume storage verification` passed on Windows Python 3.14.
