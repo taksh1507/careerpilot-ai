@@ -1,0 +1,17 @@
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-codex-*/
+.jobcare/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+out/
+build/
+dist/
+*.egg-info/

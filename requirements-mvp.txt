@@ -1,0 +1,5 @@
+# Existing discovery dependencies plus the local API and semantic matching MVP.
+-r requirements.txt
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+sentence-transformers>=3.4,<6

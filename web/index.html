@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>JobCare AI — Matching demo</title>
+  <style>
+    :root{font:16px system-ui,sans-serif;color:#182230;background:#f4f7fb}body{max-width:1000px;margin:auto;padding:1rem}header,section,.card{background:white;border:1px solid #dce4ee;border-radius:12px;padding:1rem;margin:1rem 0}h1{margin:.2rem 0}label{display:block;font-weight:600;margin:.6rem 0 .2rem}input,textarea,button{font:inherit;padding:.65rem;border:1px solid #aab7c6;border-radius:7px}input,textarea{width:100%;box-sizing:border-box}button{background:#185adb;color:white;border:0;cursor:pointer;margin:.5rem .4rem .3rem 0}button.secondary{background:#526176}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:.75rem}.muted{color:#526176}.score{font-size:1.15rem;font-weight:700;color:#185adb}.card h3{margin:.2rem 0}.skills span{display:inline-block;background:#e5efff;border-radius:20px;padding:.2rem .55rem;margin:.15rem;font-size:.85rem}a{color:#185adb;overflow-wrap:anywhere}
+  </style>
+</head>
+<body>
+  <header><h1>JobCare AI</h1><p class="muted">Local candidate review and job matching demo. Recommendations require explicit profile approval.</p></header>
+  <section><h2>Candidate profile</h2><label>User ID</label><input id="user" placeholder="Existing profile ID">
+    <div class="grid"><div><label>Skills (comma separated)</label><input id="skills"></div><div><label>Target roles</label><input id="roles" placeholder="Backend Engineer, SDE"></div><div><label>Locations</label><input id="locations" placeholder="India, Remote"></div><div><label>Employment type</label><input id="employment" placeholder="Internship, Full-time"></div></div>
+    <label>Education</label><input id="education"><label>Projects (one per line)</label><textarea id="projects" rows="3"></textarea>
+    <button onclick="loadProfile()" class="secondary">Load profile</button><button onclick="saveProfile()">Save corrections</button><button onclick="approveProfile()">Approve reviewed profile</button><button onclick="runMatches()">Rank jobs</button><p id="profileState" class="muted"></p>
+  </section>
+  <section><h2>Ranked recommendations</h2><div id="results" class="grid"></div></section>
+  <script>
+    const user=document.getElementById('user'),skills=document.getElementById('skills'),roles=document.getElementById('roles'),locations=document.getElementById('locations'),employment=document.getElementById('employment'),education=document.getElementById('education'),projects=document.getElementById('projects'),profileState=document.getElementById('profileState'),results=document.getElementById('results');
+    const split=id=>document.getElementById(id).value.split(',').map(x=>x.trim()).filter(Boolean);
+    const addText=(parent,tag,text,cls='')=>{const node=document.createElement(tag);node.textContent=text;if(cls)node.className=cls;parent.append(node);return node};
+    async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const d=await r.json();if(!r.ok)throw Error(d.detail?.message||JSON.stringify(d.detail||d));return d}
+    function payload(){return {user_id:user.value.trim(),technical_skills:split('skills'),preferred_roles:split('roles'),preferred_locations:split('locations'),employment_type:employment.value||null,education:education.value,projects:projects.value.split('\n').map(x=>x.trim()).filter(Boolean)}}
+    async function loadProfile(){try{const p=await api('/api/profile?user_id='+encodeURIComponent(user.value.trim()));skills.value=p.technical_skills.join(', ');roles.value=p.preferred_roles.join(', ');locations.value=p.preferred_locations.join(', ');employment.value=p.employment_type||'';education.value=p.education;projects.value=p.projects.join('\n');profileState.textContent=p.reviewed_at?'Reviewed '+p.reviewed_at:'Needs review';}catch(e){profileState.textContent=e.message}}
+    async function saveProfile(){try{const p=await api('/api/profile',{method:'PUT',body:JSON.stringify(payload())});profileState.textContent='Saved. Review approval was cleared; approve again after checking changes.';}catch(e){profileState.textContent=e.message}}
+    async function approveProfile(){try{await api('/api/profile/review',{method:'POST',body:JSON.stringify({user_id:user.value.trim(),approved:true})});profileState.textContent='Profile approved for recommendations.';}catch(e){profileState.textContent=e.message}}
+    async function runMatches(){results.textContent='';try{const d=await api('/api/matches',{method:'POST',body:JSON.stringify({user_id:user.value.trim()})});for(const m of d.items){const el=document.createElement('article');el.className='card';addText(el,'h3',`${m.job.title} — ${m.job.company}`);addText(el,'p',`${m.job.location||'Location not provided'} · ${m.job.employment_type||'Employment type not provided'}`);addText(el,'p',`${(m.match_score*100).toFixed(1)}% · ${m.eligibility_status}`,'score');addText(el,'p',`Deterministic ${(m.deterministic_score*100).toFixed(1)}% · Semantic ${m.semantic_score===null?'unavailable':(m.semantic_score*100).toFixed(1)+'%'}`);addText(el,'p',`Matched skills: ${(m.matched_skills||[]).join(', ')||'None found'}`);addText(el,'p',`Missing skills: ${(m.missing_skills||[]).join(', ')||'None listed'}`);const list=document.createElement('ul');for(const reason of m.explanation)addText(list,'li',reason);el.append(list);if(m.application_url){try{const u=new URL(m.application_url);if(['http:','https:'].includes(u.protocol)){const p=document.createElement('p'),a=addText(p,'a','Original application link');a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';el.append(p)}}catch{}}results.append(el)}}catch(e){results.textContent=e.message}}
+  </script>
+</body></html>
