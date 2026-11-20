@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -169,7 +170,7 @@ class SQLiteStorage:
 
     def __init__(self, db_path: str | None = None):
         if db_path is None:
-            db_path = str(Path.home() / ".jobcare" / "jobcare.db")
+            db_path = os.getenv("JOBCARE_JOB_DB", str(Path.home() / ".jobcare" / "jobcare.db"))
         self.db_path = db_path
         # Ensure the parent directory exists (Windows-safe)
         path = Path(self.db_path)
@@ -179,8 +180,10 @@ class SQLiteStorage:
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
+            self._conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(CREATE_TABLES_SQL)
             self._conn.commit()
         return self._conn

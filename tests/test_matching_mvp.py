@@ -93,6 +93,19 @@ def test_old_profile_database_migrates_without_losing_profile_data(tmp_path):
     storage.close()
 
 
+def test_storage_respects_demo_database_environment_paths(monkeypatch, tmp_path):
+    jobs_path = tmp_path / "jobs.sqlite"
+    profiles_path = tmp_path / "profiles.sqlite"
+    monkeypatch.setenv("JOBCARE_JOB_DB", str(jobs_path))
+    monkeypatch.setenv("JOBCARE_PROFILE_DB", str(profiles_path))
+    jobs = SQLiteStorage()
+    profiles = UserProfileStorage()
+    assert jobs.db_path == str(jobs_path)
+    assert profiles.db_path == str(profiles_path)
+    jobs.close()
+    profiles.close()
+
+
 def test_skill_explanation_and_semantic_weight_are_persisted(stores):
     _, profiles = stores
     candidate = profile()
@@ -116,6 +129,7 @@ def test_skill_explanation_and_semantic_weight_are_persisted(stores):
 def test_matching_fallback_is_explicitly_deterministic(stores):
     _, profiles = stores
     candidate = profile()
+    profiles.create_profile(candidate)
     results = JobMatcher(semantic_encoder=BrokenEncoder(), allow_deterministic_fallback=True).match_jobs(
         [job()], candidate, profiles
     )
@@ -128,6 +142,7 @@ def test_matching_fallback_is_explicitly_deterministic(stores):
 def test_empty_and_duplicate_jobs_have_stable_history(stores):
     _, profiles = stores
     candidate = profile()
+    profiles.create_profile(candidate)
     matcher = JobMatcher()
     assert matcher.match_jobs([], candidate, profiles) == []
     results = matcher.match_jobs([job(), job()], candidate, profiles)
@@ -138,6 +153,7 @@ def test_empty_and_duplicate_jobs_have_stable_history(stores):
 def test_explicit_eligibility_distinguishes_failure_from_unknown(stores):
     _, profiles = stores
     candidate = profile()
+    profiles.create_profile(candidate)
     matcher = JobMatcher(eligibility_filters=Filters(locations=["India"], employment_type="Full-time"))
     passed = matcher._match_single(job(), candidate, profiles)
     assert matcher._apply_eligibility(job(), candidate, passed)
@@ -159,31 +175,49 @@ def test_cosine_similarity_is_bounded():
         cosine_similarity([1], [1, 2])
 
 
-def test_real_sentence_transformer_model_executes_when_installed(monkeypatch):
+def test_real_sentence_transformer_model_executes_when_installed(monkeypatch, tmp_path):
     pytest.importorskip("sentence_transformers")
     from matching.semantic import SentenceTransformerEncoder
+    import os
+    allow_download = os.getenv("JOBCARE_RUN_REAL_MODEL_TEST") == "1" or os.getenv("JOBCARE_REQUIRE_REAL_MODEL_TEST") == "1"
     try:
         from huggingface_hub import snapshot_download
-        snapshot_download("sentence-transformers/all-MiniLM-L6-v2", local_files_only=True)
+        snapshot_download("sentence-transformers/all-MiniLM-L6-v2", local_files_only=not allow_download)
     except Exception:
-        import os
-        if os.getenv("JOBCARE_RUN_REAL_MODEL_TEST") != "1":
+        if os.getenv("JOBCARE_REQUIRE_REAL_MODEL_TEST") == "1":
+            pytest.fail("CI requires the real model to be cached before test execution")
+        if not allow_download:
             pytest.skip("Model is not cached locally; set JOBCARE_RUN_REAL_MODEL_TEST=1 to allow its download")
     monkeypatch.setenv("HF_HUB_ETAG_TIMEOUT", "15")
     monkeypatch.setenv("HF_HUB_DOWNLOAD_TIMEOUT", "30")
     encoder = SentenceTransformerEncoder()
+    candidate = profile(reviewed_at=None)
+    jobs = [
+        job("relevant", title="Python Backend Developer", skills=["Python"],
+            raw_data={"descriptionPlain": "Develop Python APIs and backend services"}),
+        job("unrelated", title="Pastry Chef", skills=["Baking"], location="Paris",
+            raw_data={"descriptionPlain": "Prepare pastries and desserts in a bakery"}),
+    ]
     try:
-        scores = encoder.score_jobs(profile(), [
-            job("relevant", title="Python Backend Developer", skills=["Python"],
-                raw_data={"descriptionPlain": "Develop Python APIs and backend services"}),
-            job("unrelated", title="Pastry Chef", skills=["Baking"], location="Paris",
-                raw_data={"descriptionPlain": "Prepare pastries and desserts in a bakery"}),
-        ])
+        storage = UserProfileStorage(str(tmp_path / "semantic.db"))
+        candidate = storage.create_profile(candidate)
+        candidate = storage.mark_profile_reviewed(candidate.user_id)
+        scores = encoder.score_jobs(candidate, jobs)
+        results = JobMatcher(semantic_encoder=encoder).match_jobs(jobs, candidate, storage)
     except Exception as exc:
+        if os.getenv("JOBCARE_REQUIRE_REAL_MODEL_TEST") == "1":
+            pytest.fail(f"Required real transformer model failed to run: {exc}")
         pytest.skip(f"Local transformer model could not be loaded in this environment: {exc}")
     assert len(scores) == 2 and all(0.0 <= score <= 1.0 for score in scores)
     assert scores[0] > scores[1]
     assert "@" in encoder.model_version
+    assert len(results) == 2 and results[0].job.original_job_id == "relevant"
+    assert results[0].semantic_score == pytest.approx(scores[0], abs=1e-3)
+    assert results[0].model_version == encoder.model_version
+    history = storage.get_match_history(candidate.user_id)
+    assert len(history) == 2
+    assert all(item.semantic_score is not None and item.model_version == encoder.model_version for item in history)
+    storage.close()
 
 
 def test_match_history_keeps_backward_compatible_explanations(stores):
@@ -196,10 +230,6 @@ def test_match_history_keeps_backward_compatible_explanations(stores):
 
 
 def test_fastapi_profile_jobs_review_and_recommendations(tmp_path):
-    try:
-        import fastapi  # noqa: F401
-    except Exception as exc:
-        pytest.skip(f"FastAPI dependencies cannot be loaded in this interpreter: {exc}")
     from fastapi.testclient import TestClient
     from api.main import create_app
 
@@ -211,7 +241,12 @@ def test_fastapi_profile_jobs_review_and_recommendations(tmp_path):
         assert client.get("/ready").json()["ready"] is True
         assert client.get("/api/jobs").json()["total"] == 1
         assert client.post("/api/matches", json={"user_id": "candidate-1"}).status_code == 409
-        update = profile(reviewed_at=None).__dict__
+        candidate_payload = profile(reviewed_at=None).__dict__
+        update = {key: candidate_payload[key] for key in (
+            "user_id", "education", "graduation_year", "technical_skills", "projects",
+            "work_experience", "preferred_roles", "preferred_locations",
+            "remote_preference", "employment_type",
+        )}
         assert client.put("/api/profile", json=update).status_code == 200
         assert client.post("/api/profile/review", json={"user_id": "candidate-1", "approved": True}).status_code == 200
         recommendations = client.post("/api/matches", json={"user_id": "candidate-1"})
@@ -224,10 +259,6 @@ def test_fastapi_profile_jobs_review_and_recommendations(tmp_path):
 
 
 def test_api_rejects_bad_input_and_requires_explicit_approval(tmp_path):
-    try:
-        import fastapi  # noqa: F401
-    except Exception as exc:
-        pytest.skip(f"FastAPI dependencies cannot be loaded in this interpreter: {exc}")
     from fastapi.testclient import TestClient
     from api.main import create_app
 

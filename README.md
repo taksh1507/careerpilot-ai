@@ -1,42 +1,43 @@
 # CareerPilot AI — Job Scout Matching MVP
 
-This repository is the existing Python discovery and matching component. Milestone 1 adds local candidate profile review, explainable deterministic and semantic matching, a FastAPI interface, and a small local demo dashboard. It does not replace the existing Greenhouse, Lever, or Ashby adapters or the SQLite job store.
+This repository is the existing Python discovery and matching component. Milestone 1 adds local candidate profile review, explainable deterministic and semantic matching, a FastAPI interface, and a small local demo dashboard. It preserves the existing Greenhouse, Lever, and Ashby adapters and SQLite job store.
 
-## Architecture in this milestone
+## Architecture and status
 
-- `adapters/`, `models/`, `storage/database.py`: existing public ATS board ingestion, normalized jobs, and job persistence.
-- `storage/user_profile.py`: candidate profiles, resume extraction records, reviewed state, and match history. Migrations add columns without dropping older data.
-- `matching/`: weighted deterministic matching and optional local Sentence Transformers embeddings.
-- `api/main.py`: local FastAPI integration over the existing SQLite stores.
-- `web/index.html`: responsive profile review and ranked job results page served at `/`.
-- `tests/`: offline fixture tests plus a real transformer model test when the optional model dependencies are installed.
+- **Implemented:** `adapters/`, `models/`, `storage/database.py` provide public ATS board ingestion, normalized jobs, and persistent job storage.
+- **Implemented:** `storage/user_profile.py` stores candidate profiles, resume extraction records, reviewed state, and match history. Additive SQLite migrations preserve existing data.
+- **Implemented:** `matching/` combines weighted deterministic matching with optional local Sentence Transformers cosine similarity.
+- **Implemented:** `api/main.py` exposes a loopback-only FastAPI service over the existing SQLite stores.
+- **Implemented:** `web/index.html` provides a responsive local profile review, saved jobs, and ranked results dashboard.
+- **Verified:** the full test suite passes on Ubuntu 24.04 WSL2, including API integration and real model execution. See [docs/TEST_REPORT.md](docs/TEST_REPORT.md).
+- **Planned:** React Native + Expo, Hermes worker on AWS EC2 with EventBridge/Lambda orchestration, S3 snapshots, and DynamoDB run metadata. No cloud resources were created. Manual applications remain the only application flow.
 
-The broader agreed architecture remains React Native + Expo, a FastAPI backend, local mobile SQLite, and a Hermes worker on AWS EC2 with EventBridge/Lambda orchestration, S3 snapshots, and DynamoDB run metadata. Those mobile and AWS components are not implemented by this milestone; no AWS resources are created here. Manual applications remain the only application flow.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/API.md](docs/API.md), [docs/DEMO.md](docs/DEMO.md), and [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Install and run locally
 
-Use Python 3.10 or newer. The existing CLI requirements remain in `requirements.txt`; install the MVP additions in an isolated environment:
+Use Python 3.10 or newer. The existing CLI requirements remain in `requirements.txt`; MVP dependencies use CPU-only PyTorch to avoid installing unused CUDA packages:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-mvp.txt
+\.venv\Scripts\python.exe -m pip install -r requirements-test.txt
 ```
 
-The first semantic request downloads `sentence-transformers/all-MiniLM-L6-v2` into the local Hugging Face model cache and runs it on CPU. Set `JOBCARE_MODEL_ID` and `JOBCARE_MODEL_REVISION` to select a compatible local Sentence Transformers model/revision. No paid model API is used. If the model package or local model is unavailable, recommendations fall back to deterministic scoring and label the semantic score unavailable.
+On first semantic use, `sentence-transformers/all-MiniLM-L6-v2` downloads to the local Hugging Face cache and runs on CPU. No paid model API is used. Set `JOBCARE_MODEL_ID` and `JOBCARE_MODEL_REVISION` to select another compatible local model. If the model is unavailable, recommendations fall back to deterministic scoring and label the semantic score unavailable.
 
-The API defaults its database paths to `~/.jobcare/jobcare.db`; override with `JOBCARE_JOB_DB` and `JOBCARE_PROFILE_DB`. Tests and demos should use temporary database paths. The server binds to loopback only:
+Set isolated database paths, then start the API bound to loopback:
 
 ```powershell
-$env:JOBCARE_JOB_DB = "$PWD\demo-jobs.db"
-$env:JOBCARE_PROFILE_DB = "$PWD\demo-profiles.db"
-.\.venv\Scripts\python.exe -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+$env:JOBCARE_JOB_DB = "$env:TEMP\careerpilot-demo-jobs.db"
+$env:JOBCARE_PROFILE_DB = "$env:TEMP\careerpilot-demo-profiles.db"
+\.venv\Scripts\python.exe -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open `http://127.0.0.1:8000/` for the dashboard or `http://127.0.0.1:8000/docs` for OpenAPI. Do not bind this unauthenticated demo to a public interface. It is not a production deployment or an authentication boundary.
+Open `http://127.0.0.1:8000/` for the dashboard or `http://127.0.0.1:8000/docs` for OpenAPI. Do not bind this unauthenticated demo to a public interface. On Windows systems where Application Control blocks the Pydantic native extension, run it in Ubuntu 24.04 WSL2; do not weaken security controls.
 
-## API examples
+## API and candidate review
 
-Candidate records are created/imported through the existing CLI. Resume extraction never approves the resulting profile. First inspect and correct it:
+Candidate records are created or imported through the existing CLI. Resume extraction does not approve a profile. Retrieve and correct it before explicitly approving:
 
 ```http
 GET /api/profile?user_id=demo
@@ -44,49 +45,44 @@ PUT /api/profile
 Content-Type: application/json
 ```
 
-The `PUT` JSON body uses `user_id`, `technical_skills`, `preferred_roles`, `preferred_locations`, `employment_type`, `education`, `graduation_year`, `projects`, `work_experience`, and `remote_preference`. Editing clears any prior approval. Explicitly approve the corrected profile:
+The PUT body accepts `user_id`, `technical_skills`, `preferred_roles`, `preferred_locations`, `employment_type`, `education`, `graduation_year`, `projects`, `work_experience`, and `remote_preference`. Editing clears approval.
 
 ```http
 POST /api/profile/review
 {"user_id":"demo","approved":true}
-```
 
-Then request recommendations and history:
-
-```http
 POST /api/matches
 {"user_id":"demo","limit":50,"semantic_weight":0.30}
+
 GET /api/matches?user_id=demo
 GET /api/jobs?limit=100&offset=0
 GET /health
 GET /ready
 ```
 
-Matching returns scores, matched/missing skills, eligibility status, explanations, model identifier, and the original application URL. The API does not submit applications.
+Matching responses contain deterministic and semantic scores, matched and missing skills, eligibility status, explanations, model/algorithm identifiers, and original application URLs. The API does not submit applications.
 
 ## Matching methodology
 
-The deterministic score keeps the existing weighted dimensions: skill overlap 0.40, role relevance 0.20, experience 0.20, location preference 0.10, and education 0.10. Scores are normalized to 0–1. Where the local model is available, cosine similarity between profile text and normalized job text is combined as `0.70 × deterministic + 0.30 × semantic` by default; callers may change the semantic weight from 0 to 1. The model identifier/revision and algorithm version are stored with match history.
+The deterministic score keeps existing weighted dimensions: skill overlap 0.40, role relevance 0.20, experience 0.20, location preference 0.10, and education 0.10. Scores are normalized to 0–1. With the local model available, cosine similarity between candidate text and normalized job text is combined as `0.70 × deterministic + 0.30 × semantic` by default. Callers may set the semantic weight from 0 to 1. Model identifier and algorithm version are recorded with match history.
 
-Eligibility uses explicit profile constraints for role, location, employment type, and experience ranges. A clear conflict is ineligible and excluded from recommendation results. Missing listing evidence remains unknown and is retained. Candidate years of experience are not inferred from a count of resume entries. Unknown locations and ambiguous short strings are not converted to countries.
+Eligibility checks explicit role, location, employment type, and experience criteria. A clear conflict is ineligible and excluded from recommendation results. Missing listing evidence stays unknown and is retained. The matcher does not infer years of experience from resume-entry counts or convert ambiguous location text into a country.
 
 ## Tests
 
-Run the offline suite:
+Install test dependencies and run:
 
 ```powershell
 python -m pip install -r requirements-test.txt
 python -m pytest -q
 ```
 
-`tests/test_matching_mvp.py` exercises profile review enforcement, legacy SQLite migration, score components, skill explanations, eligibility outcomes, API validation, duplicate-safe history, cosine calculations, and a real embedding-model execution when Sentence Transformers and the cached model are available. The suite stays offline by default; set `JOBCARE_RUN_REAL_MODEL_TEST=1` to allow downloading the model for that specific test. Deterministic tests use local fixtures and make no API calls.
+The current suite covers the original 67 tests plus review enforcement, SQLite migration, scoring/explanations, eligibility, validation, API flows, duplicates, cosine similarity, and a real local transformer test. CI requires the real model test instead of silently skipping it. The verified run was `80 passed in 20.88s` on Ubuntu 24.04 WSL2; details and Windows runtime limitation are in [docs/TEST_REPORT.md](docs/TEST_REPORT.md).
 
-Latest full run: Python 3.14 isolated environment, `77 passed, 2 skipped`; the real local transformer test passed. The two FastAPI integration tests were skipped because Windows Application Control blocked the installed `pydantic_core` native extension (`DLL load failed while importing _pydantic_core`). The existing 67-test suite passed within that run. On the system interpreter, the pytest-asyncio plugin emits deprecation warnings for its use of `asyncio.iscoroutinefunction`; this originates in the installed plugin and did not fail tests. No unrelated plugin upgrade was applied.
+## Security and limitations
 
-## Limitations
-
-- This is a local-only demo API without user authentication; it must not be exposed publicly.
-- The profile store still uses the existing comma-delimited fields for several lists, which cannot losslessly represent values containing commas.
-- Job source errors and discovery orchestration remain in the existing CLI; this API serves jobs already persisted in SQLite.
-- Expo/mobile UI, Hermes deployment, EventBridge/Lambda, S3, and DynamoDB are future milestones and are not claimed as implemented.
-- Semantic ranking depends on local model availability and CPU/memory capacity; fallback is deterministic only.
+- The local API has no user authentication; it only accepts loopback requests by default and must not be exposed publicly.
+- The current profile store uses comma-delimited fields for some lists, so values containing commas are not lossless.
+- This API serves jobs already in SQLite; discovery remains in the existing CLI.
+- Semantic quality depends on model choice and CPU/memory capacity. If the model cannot load, fallback is deterministic and clearly labeled.
+- Expo/mobile, Hermes deployment, EventBridge/Lambda, S3, and DynamoDB are future milestones and are not implemented.
